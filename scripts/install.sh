@@ -11,6 +11,7 @@ WEBTERM_HOME="${WEBTERM_HOME:-/home/${WEBTERM_USER}}"
 WEB_USER="${WEB_USER:-admin}"
 WEB_PASS="${WEB_PASS:-}"
 LINUX_PASS="${LINUX_PASS:-}"
+FORCE_UNLOCK_SECRET="${WEBTERM_FORCE_UNLOCK_SECRET:-}"
 SKIP_OPENRESTY="${SKIP_OPENRESTY:-0}"
 
 need_root() {
@@ -54,6 +55,11 @@ fi
 
 WEB_PASS="${WEB_PASS:-$(rand_pass)}"
 LINUX_PASS="${LINUX_PASS:-$(rand_pass)}"
+FORCE_UNLOCK_SECRET="${FORCE_UNLOCK_SECRET:-$(rand_pass)}"
+if [[ "${FORCE_UNLOCK_SECRET}" == *$'\n'* || "${FORCE_UNLOCK_SECRET}" == *$'\r'* ]]; then
+  echo "WEBTERM_FORCE_UNLOCK_SECRET 不能包含换行。" >&2
+  exit 1
+fi
 
 echo "==> 创建用户 ${WEBTERM_USER}"
 if ! id "${WEBTERM_USER}" >/dev/null 2>&1; then
@@ -82,8 +88,16 @@ WEB_USERNAME=${WEB_USER}
 WEB_PASSWORD=${WEB_PASS}
 LINUX_USERNAME=${WEBTERM_USER}
 LINUX_PASSWORD=${LINUX_PASS}
+FORCE_UNLOCK_SECRET=${FORCE_UNLOCK_SECRET}
 CREDS
 chmod 600 "${INSTALL_DIR}/etc/credentials"
+
+# systemd reads this file before dropping privileges to the webterm user.
+ESCAPED_FORCE_SECRET="${FORCE_UNLOCK_SECRET//\\/\\\\}"
+ESCAPED_FORCE_SECRET="${ESCAPED_FORCE_SECRET//\"/\\\"}"
+printf 'WEBTERM_FORCE_UNLOCK_SECRET="%s"\n' "${ESCAPED_FORCE_SECRET}" \
+  > "${INSTALL_DIR}/etc/manager.env"
+chmod 600 "${INSTALL_DIR}/etc/manager.env"
 
 # htpasswd for nginx basic auth
 if command -v openssl >/dev/null 2>&1; then

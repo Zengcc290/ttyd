@@ -162,16 +162,17 @@
       return `${Math.floor(seconds / 86400)} 天前`;
     }
 
-    function terminalUrl(id) {
+    function terminalUrl(id, lockToken) {
       const url = new URL('/terminal/', location.origin);
       url.searchParams.append('arg', id);
+      url.searchParams.set('lock_token', lockToken);
       return url.toString();
     }
 
     let pendingOpen = null; // {id, targetWindow}
 
-    function openSession(id, targetWindow = undefined) {
-      const destination = terminalUrl(id);
+    function openSession(id, lockToken, targetWindow = undefined) {
+      const destination = terminalUrl(id, lockToken);
       if (targetWindow === null) window.location.assign(destination);
       else if (targetWindow) targetWindow.location = destination;
       else window.open(destination, '_blank', 'noopener');
@@ -192,49 +193,36 @@
       pendingOpen = null;
     }
 
+    function closeTarget(targetWindow) {
+      if (targetWindow && targetWindow !== null) {
+        try { targetWindow.close(); } catch (_) {}
+      }
+    }
+
     async function tryOpenSession(id, targetWindow = undefined) {
       // Always ask backend at click time (never trust stale button state alone).
       try {
         const status = await api(`/api/sessions/${id}/lock`);
         if (status.locked) {
-          if (targetWindow && targetWindow !== null) {
-            try { targetWindow.close(); } catch (_) {}
-          }
-          showForceUnlock(id, targetWindow === undefined ? undefined : targetWindow, status);
+          showForceUnlock(id, targetWindow, status);
           return false;
         }
-        // Pre-acquire so concurrent devices racing at the same moment still serialize.
+        // Acquire is the authoritative, atomic check against concurrent devices.
         const owner = `dashboard ${navigator.userAgent.slice(0, 32)}`;
-        try {
-          const acquired = await api(`/api/sessions/${id}/acquire`, {
-            method: 'POST',
-            body: JSON.stringify({ owner })
-          });
-          // Immediately release here; terminal page will re-acquire as the real holder.
-          // This is a reservation probe against race; short window remains but much safer than UI-only.
-          if (acquired.token) {
-            await api(`/api/sessions/${id}/release`, {
-              method: 'POST',
-              body: JSON.stringify({ token: acquired.token })
-            }).catch(() => {});
-          }
-        } catch (probeErr) {
-          if (probeErr.message && probeErr.message.includes('locked')) {
-            if (targetWindow && targetWindow !== null) {
-              try { targetWindow.close(); } catch (_) {}
-            }
-            showForceUnlock(id, targetWindow === undefined ? undefined : targetWindow, probeErr.body || {});
-            return false;
-          }
-          // If probe failed for other reasons, still open; terminal page will enforce.
-        }
-        openSession(id, targetWindow);
+        const acquired = await api(`/api/sessions/${id}/acquire`, {
+          method: 'POST',
+          body: JSON.stringify({ owner })
+        });
+        openSession(id, acquired.token, targetWindow);
         return true;
       } catch (error) {
-        // On lock API failure, still attempt open but warn.
-        toast(`锁状态查询失败，仍尝试打开：${error.message}`, true);
-        openSession(id, targetWindow);
-        return true;
+        if (error.status === 409) {
+          showForceUnlock(id, targetWindow, error.body || {});
+          return false;
+        }
+        closeTarget(targetWindow);
+        toast(`锁状态校验失败，已拒绝进入：${error.message}`, true);
+        return false;
       }
     }
 
@@ -288,12 +276,18 @@
         actions.className = 'actions';
         actions.append(
           button(session.locked ? '已锁定' : '继续', session.locked ? 'locked' : 'open', async () => {
-            await tryOpenSession(session.id);
+            const popup = window.open('', '_blank');
+            if (popup) popup.opener = null;
+            await tryOpenSession(session.id, popup || null);
           }),
           button('强制解锁', '', async () => {
             showForceUnlock(session.id, undefined, session.lock || {});
           }),
           button('重置', '', async () => {
+            if (session.locked) {
+              showForceUnlock(session.id, undefined, session.lock || {});
+              return;
+            }
             if (!confirm(`确定清空“${session.name}”吗？其中正在运行的程序也会终止。`)) return;
             const popup = window.open('', '_blank');
             if (popup) popup.opener = null;
@@ -304,7 +298,8 @@
               await refresh();
             } catch (error) {
               if (popup) popup.close();
-              toast(error.message, true);
+              if (error.status === 409) showForceUnlock(session.id, undefined, error.body || {});
+              else toast(error.message, true);
             }
           }),
           button('删除', 'danger', async () => {
@@ -345,6 +340,54 @@
         if (popup) popup.close();
         toast(error.message, true);
       }
+    });
+
+    document.getElementById('forceUnlockCancel').addEventListener('click', () => {
+      if (pendingOpen) closeTarget(pendingOpen.targetWindow);
+      hideForceUnlock();
+    });
+
+    document.getElementById('forceUnlockConfirm').addEventListener('click', async () => {
+      if (!pendingOpen) return;
+      const secretInput = document.getElementById('forceUnlockSecret');
+      const secret = secretInput.value;
+      if (!secret) {
+        toast('请输入强制解锁密文', true);
+        secretInput.focus();
+        return;
+      }
+
+      const request = pendingOpen;
+      let targetWindow = request.targetWindow;
+      if (targetWindow === undefined || (targetWindow && targetWindow.closed)) {
+        targetWindow = window.open('', '_blank');
+        if (targetWindow) targetWindow.opener = null;
+        if (!targetWindow) targetWindow = null;
+      }
+      const confirmButton = document.getElementById('forceUnlockConfirm');
+      confirmButton.disabled = true;
+      try {
+        await api(`/api/sessions/${request.id}/force-unlock`, {
+          method: 'POST',
+          body: JSON.stringify({ secret })
+        });
+        hideForceUnlock();
+        const opened = await tryOpenSession(request.id, targetWindow);
+        if (opened) toast('已强制释放旧连接并进入终端');
+      } catch (error) {
+        closeTarget(targetWindow);
+        toast(`强制解锁失败：${error.message}`, true);
+      } finally {
+        confirmButton.disabled = false;
+      }
+    });
+
+    document.getElementById('forceUnlockSecret').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') document.getElementById('forceUnlockConfirm').click();
+    });
+
+    document.getElementById('forceUnlockMask').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) document.getElementById('forceUnlockCancel').click();
     });
 
     refresh();

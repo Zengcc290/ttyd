@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 HOST = "127.0.0.1"
 PORT = 7684
@@ -23,7 +23,7 @@ IDLE_TTL = int(os.environ.get("WEBTERM_IDLE_TTL_SECONDS", "604800"))
 CLEANUP_INTERVAL = int(os.environ.get("WEBTERM_CLEANUP_INTERVAL_SECONDS", "600"))
 LOCK = threading.RLock()
 
-FORCE_UNLOCK_SECRET = os.environ.get("WEBTERM_FORCE_UNLOCK_SECRET", "webterm-force-unlock")
+FORCE_UNLOCK_SECRET = os.environ.get("WEBTERM_FORCE_UNLOCK_SECRET", "")
 LOCK_TTL_SECONDS = int(os.environ.get("WEBTERM_LOCK_TTL_SECONDS", "120"))
 
 
@@ -42,13 +42,20 @@ def read_lock(session_id: str) -> dict | None:
         return None
 
 
-def write_lock(session_id: str, token: str, owner: str = "") -> dict:
+def write_lock(
+    session_id: str,
+    token: str,
+    owner: str = "",
+    page_id: str = "",
+    locked_at: int | None = None,
+) -> dict:
     now = int(time.time())
     data = {
         "session_id": session_id,
         "token": token,
         "owner": (owner or "")[:120],
-        "locked_at": now,
+        "page_id": page_id,
+        "locked_at": locked_at or now,
         "heartbeat_at": now,
         "expires_at": now + LOCK_TTL_SECONDS,
     }
@@ -93,6 +100,51 @@ def purge_expired_lock(session_id: str) -> None:
     lock = read_lock(session_id)
     if lock and not lock_active(lock):
         clear_lock(session_id)
+
+
+def terminal_access_allowed(original_uri: str) -> tuple[bool, str]:
+    """Validate the lock token carried by a terminal page or websocket URL."""
+    query = parse_qs(urlparse(original_uri).query, keep_blank_values=True)
+    session_id = next(
+        (
+            value
+            for key in ("arg", "arg[]")
+            for value in query.get(key, [])
+            if valid_id(value)
+        ),
+        "",
+    )
+    token = next((value for value in query.get("lock_token", []) if value), "")
+    page_id = next(
+        (value for value in query.get("page_id", []) if re.fullmatch(r"[a-f0-9]{32}", value)),
+        "",
+    )
+    if not session_id or not token:
+        return False, session_id
+
+    purge_expired_lock(session_id)
+    current = read_lock(session_id)
+    current_token = str(current.get("token") or "") if lock_active(current) else ""
+    if not current_token or not secrets.compare_digest(current_token, token):
+        return False, session_id
+
+    # The HTML navigation validates the reservation. The websocket is the
+    # authoritative per-page claim, preventing a copied URL opening twice.
+    if urlparse(original_uri).path == "/terminal/ws":
+        if not page_id:
+            return False, session_id
+        claimed_page = str(current.get("page_id") or "")
+        if claimed_page and not secrets.compare_digest(claimed_page, page_id):
+            return False, session_id
+        if not claimed_page:
+            write_lock(
+                session_id,
+                current_token,
+                str(current.get("owner") or ""),
+                page_id,
+                int(current.get("locked_at") or time.time()),
+            )
+    return True, session_id
 
 
 
@@ -143,6 +195,11 @@ def attached_clients(session_id: str) -> int:
 def kill_tmux(session_id: str) -> None:
     if has_session(session_id):
         run_tmux("kill-session", "-t", session_id)
+
+
+def detach_tmux_clients(session_id: str) -> None:
+    if has_session(session_id):
+        run_tmux("detach-client", "-s", session_id)
 
 
 def write_meta(session_id: str, name: str, created: int | None = None) -> dict:
@@ -270,6 +327,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path.rstrip("/")
+        if path == "/internal/terminal-access":
+            original_uri = self.headers.get("X-Webterm-Original-URI", "")
+            with state_lock():
+                allowed, session_id = terminal_access_allowed(original_uri)
+                if not allowed:
+                    self.send_json(403, {"error": "terminal locked or invalid token"})
+                    return
+                self.send_json(200, {"ok": True, "id": session_id})
+            return
         if path == "/api/sessions":
             with state_lock():
                 self.send_json(200, {"sessions": list_sessions(), "idle_ttl": IDLE_TTL})
@@ -340,6 +406,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if action == "heartbeat":
                     token = str(payload.get("token") or "")
+                    page_id = str(payload.get("page_id") or "")
                     if not lock_active(current) or current.get("token") != token:
                         self.send_json(409, {
                             "error": "lock not held",
@@ -347,13 +414,35 @@ class Handler(BaseHTTPRequestHandler):
                             **public_lock_info(current),
                         })
                         return
-                    lock = write_lock(session_id, token, str(current.get("owner") or ""))
+                    claimed_page = str(current.get("page_id") or "")
+                    if (
+                        not re.fullmatch(r"[a-f0-9]{32}", page_id)
+                        or (claimed_page and not secrets.compare_digest(claimed_page, page_id))
+                    ):
+                        self.send_json(409, {"error": "lock held by another page", "id": session_id})
+                        return
+                    lock = write_lock(
+                        session_id,
+                        token,
+                        str(current.get("owner") or ""),
+                        page_id,
+                        int(current.get("locked_at") or time.time()),
+                    )
                     self.send_json(200, {"ok": True, "id": session_id, **public_lock_info(lock)})
                     return
 
                 if action == "release":
                     token = str(payload.get("token") or "")
-                    if current and current.get("token") == token:
+                    page_id = str(payload.get("page_id") or "")
+                    claimed_page = str(current.get("page_id") or "") if current else ""
+                    page_matches = bool(
+                        re.fullmatch(r"[a-f0-9]{32}", page_id)
+                        and (
+                            not claimed_page
+                            or secrets.compare_digest(claimed_page, page_id)
+                        )
+                    )
+                    if current and current.get("token") == token and page_matches:
                         clear_lock(session_id)
                         self.send_json(200, {"ok": True, "id": session_id, "locked": False})
                         return
@@ -366,9 +455,14 @@ class Handler(BaseHTTPRequestHandler):
 
                 if action == "force-unlock":
                     secret = str(payload.get("secret") or "")
-                    if secret != FORCE_UNLOCK_SECRET:
+                    if not FORCE_UNLOCK_SECRET:
+                        self.send_json(503, {"error": "force unlock is not configured"})
+                        return
+                    if not secrets.compare_digest(secret, FORCE_UNLOCK_SECRET):
                         self.send_json(403, {"error": "invalid force unlock secret"})
                         return
+                    # End the previous ttyd attachment as well as invalidating its token.
+                    detach_tmux_clients(session_id)
                     clear_lock(session_id)
                     self.send_json(200, {"ok": True, "id": session_id, "locked": False, "forced": True})
                     return
@@ -385,6 +479,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(404, {"error": "session not found"})
                 return
             if action == "reset":
+                purge_expired_lock(session_id)
+                current = read_lock(session_id)
+                if lock_active(current):
+                    self.send_json(409, {
+                        "error": "session locked",
+                        "id": session_id,
+                        **public_lock_info(current),
+                    })
+                    return
                 kill_tmux(session_id)
                 activity_path(session_id).touch()
                 clear_lock(session_id)

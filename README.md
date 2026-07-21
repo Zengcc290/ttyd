@@ -46,7 +46,8 @@ sudo bash scripts/install.sh
 可选环境变量：
 
 ```bash
-sudo WEB_USER=admin WEB_PASS='你的网页密码' LINUX_PASS='webterm用户密码' bash scripts/install.sh
+sudo WEB_USER=admin WEB_PASS='你的网页密码' LINUX_PASS='webterm用户密码' \
+  WEBTERM_FORCE_UNLOCK_SECRET='强制解锁密文' bash scripts/install.sh
 # 不自动同步 OpenResty:
 sudo SKIP_OPENRESTY=1 bash scripts/install.sh
 ```
@@ -91,8 +92,8 @@ sudo bash scripts/uninstall.sh
 
 ## 终端互斥锁 / 复制粘贴 / 缩放
 
-- 打开终端页会自动加锁（心跳 30s，TTL 120s），关闭页面自动释放
-- 首页点击“继续”时会向后端查询锁状态；已锁则拒绝并提示强制解锁
-- 强制解锁默认密文：`webterm-force-unlock`（可用环境变量 `WEBTERM_FORCE_UNLOCK_SECRET` 覆盖）
+- 首页点击“继续”时由后端原子加锁；终端页面和 WebSocket 握手都会再次校验锁令牌
+- 锁心跳间隔 10s、TTL 120s，关闭页面自动释放；强制解锁会断开旧终端连接
+- 强制解锁密文在安装时随机生成，也可通过 `WEBTERM_FORCE_UNLOCK_SECRET` 指定；安装后见 `/opt/webterm/etc/credentials`
 - 终端页右上角悬浮按钮：🔍 缩放、⎘ 复制模式、📋 粘贴弹窗
 - 复制模式会禁用触摸滚动；退出后恢复

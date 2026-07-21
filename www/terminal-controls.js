@@ -1,8 +1,15 @@
 (() => {
-  const VERSION = 7;
-  const FORCE_SECRET_DEFAULT = 'webterm-force-unlock';
+  const VERSION = 8;
 
   const qs = new URLSearchParams(location.search);
+  const pageId = (() => {
+    const bytes = new Uint8Array(16);
+    if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+      window.crypto.getRandomValues(bytes);
+      return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+    }
+    return `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.padEnd(32, '0').slice(0, 32);
+  })();
   const sessionId = (() => {
     for (const [k, v] of qs.entries()) {
       if ((k === 'arg' || k === 'arg[]') && /^s-[a-f0-9]{16}$/.test(v)) return v;
@@ -14,12 +21,32 @@
   const state = (window.__webtermControls = {
     version: VERSION,
     sessionId,
-    lockToken: '',
+    lockToken: qs.get('lock_token') || '',
+    pageId,
     copyMode: false,
     zoomMode: false,
     zoom: 1,
     heartbeatTimer: null,
+    sockets: new Set(),
   });
+
+  // This script is injected in <head>, before ttyd creates its websocket.
+  const NativeWebSocket = window.WebSocket;
+  window.WebSocket = class WebtermTrackedSocket extends NativeWebSocket {
+    constructor(...args) {
+      const rawUrl = args[0];
+      let url = rawUrl;
+      try {
+        const parsed = new URL(String(rawUrl), location.href);
+        parsed.searchParams.set('page_id', state.pageId);
+        url = parsed.toString();
+      } catch (_) {}
+      if (args.length > 1) super(url, args[1]);
+      else super(url);
+      state.sockets.add(this);
+      this.addEventListener('close', () => state.sockets.delete(this), { once: true });
+    }
+  };
 
   const api = async (path, options = {}) => {
     const response = await fetch(path, {
@@ -44,6 +71,7 @@
   const css = `
   .wt-fab-stack{position:fixed;top:12px;right:12px;z-index:2147483000;display:flex;flex-direction:column;gap:10px;align-items:flex-end;pointer-events:none}
   .wt-fab{pointer-events:auto;width:44px;height:44px;border-radius:999px;border:1px solid rgba(255,255,255,.18);background:rgba(20,24,28,.42);color:#e8eef2;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-shadow:0 10px 28px rgba(0,0,0,.28);display:grid;place-items:center;cursor:pointer;font-size:18px;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+  .wt-icon{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
   .wt-fab:hover{background:rgba(32,40,46,.62)}
   .wt-fab.active{background:rgba(68,199,138,.78);color:#04150f;border-color:transparent}
   .wt-zoom-panel{pointer-events:auto;display:none;gap:8px;align-items:center;padding:8px 10px;border-radius:14px;background:rgba(16,18,20,.72);border:1px solid rgba(255,255,255,.12);color:#e8eef2;backdrop-filter:blur(10px)}
@@ -56,10 +84,10 @@
   .wt-banner button{border:0;border-radius:8px;padding:7px 10px;background:rgba(255,255,255,.12);color:inherit;cursor:pointer}
   .wt-modal-mask{position:fixed;inset:0;z-index:2147483010;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:18px}
   .wt-modal-mask.show{display:flex}
-  .wt-modal{width:min(560px,100%);background:#171a1d;border:1px solid #343a40;border-radius:12px;box-shadow:0 24px 80px rgba(0,0,0,.45);color:#f1f3f5;padding:16px}
+  .wt-modal{box-sizing:border-box;width:min(560px,100%);max-height:calc(100vh - 36px);overflow:auto;background:#171a1d;border:1px solid #343a40;border-radius:8px;box-shadow:0 24px 80px rgba(0,0,0,.45);color:#f1f3f5;padding:16px}
   .wt-modal h3{margin:0 0 8px;font-size:16px}
   .wt-modal p{margin:0 0 12px;color:#9ca3aa;font-size:13px}
-  .wt-modal textarea{width:100%;min-height:180px;resize:vertical;border-radius:8px;border:1px solid #3a4248;background:#0f1214;color:#f1f3f5;padding:12px;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre;tab-size:4}
+  .wt-modal textarea{box-sizing:border-box;width:100%;min-height:180px;resize:vertical;border-radius:8px;border:1px solid #3a4248;background:#0f1214;color:#f1f3f5;padding:12px;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre;tab-size:4}
   .wt-modal .row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
   .wt-modal .row button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;font:600 13px/1 system-ui,sans-serif}
   .wt-modal .ok{background:#44c78a;color:#04150f}
@@ -67,6 +95,7 @@
   body.wt-copy-mode, body.wt-copy-mode .xterm, body.wt-copy-mode .xterm-screen{cursor:crosshair !important}
   body.wt-copy-mode .xterm-selection div{background:rgba(68,199,138,.35)!important}
   #terminal-container, .xterm, .xterm-viewport, .xterm-screen { transform-origin: 0 0; }
+  @media (max-width:600px){.wt-banner{top:auto;bottom:12px;max-width:calc(100vw - 24px)}}
   `;
 
   const injectCss = () => {
@@ -82,9 +111,10 @@
     if (!el) {
       el = document.createElement('div');
       el.id = 'wt-toast';
-      el.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483020;max-width:min(420px,calc(100vw - 32px));padding:12px 14px;border-radius:10px;background:rgba(20,24,28,.92);border:1px solid #485057;color:#f1f3f5;opacity:0;transform:translateY(10px);transition:.18s ease;pointer-events:none;font:13px/1.4 system-ui,sans-serif';
+      el.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483020;max-width:min(420px,calc(100vw - 32px));padding:12px 14px;border-radius:10px;background:rgba(20,24,28,.92);border:1px solid #485057;color:#f1f3f5;opacity:0;transform:translateY(10px);transition:opacity .18s ease,transform .18s ease;pointer-events:none;font:13px/1.4 system-ui,sans-serif';
       document.body.appendChild(el);
     }
+    el.style.bottom = state.copyMode && matchMedia('(max-width:600px)').matches ? '120px' : '16px';
     el.textContent = message;
     el.style.borderColor = isError ? '#7f3040' : '#485057';
     el.style.color = isError ? '#fecdd3' : '#f1f3f5';
@@ -120,22 +150,18 @@
     const terminal = window.term;
     state.zoom = Math.max(0.7, Math.min(2.5, Number(value) || 1));
     const scale = state.zoom;
-    const targets = [
-      document.getElementById('terminal-container'),
-      document.querySelector('.xterm'),
-      document.querySelector('.xterm-screen'),
-    ].filter(Boolean);
-    for (const el of targets) {
-      el.style.transform = scale === 1 ? '' : `scale(${scale})`;
-      el.style.transformOrigin = '0 0';
-    }
-    const host = document.getElementById('terminal-container') || document.body;
+    const host = document.getElementById('terminal-container');
+    if (!host) return;
+    host.style.transform = scale === 1 ? '' : `scale(${scale})`;
+    host.style.transformOrigin = '0 0';
     if (scale !== 1) {
       host.style.width = `${100 / scale}%`;
       host.style.height = `${100 / scale}%`;
+      host.style.margin = '0';
     } else {
       host.style.width = '';
       host.style.height = '';
+      host.style.margin = '';
     }
     try {
       if (terminal && typeof terminal.refresh === 'function') terminal.refresh(0, terminal.rows - 1);
@@ -149,7 +175,10 @@
     state.copyMode = !!on;
     document.body.classList.toggle('wt-copy-mode', state.copyMode);
     const btn = document.getElementById('wt-copy-btn');
-    if (btn) btn.classList.toggle('active', state.copyMode);
+    if (btn) {
+      btn.classList.toggle('active', state.copyMode);
+      btn.setAttribute('aria-pressed', String(state.copyMode));
+    }
     const banner = document.getElementById('wt-copy-banner');
     if (banner) banner.classList.toggle('show', state.copyMode);
     window.__webtermCopyMode = state.copyMode;
@@ -163,7 +192,10 @@
   const setZoomMode = (on) => {
     state.zoomMode = !!on;
     const btn = document.getElementById('wt-zoom-btn');
-    if (btn) btn.classList.toggle('active', state.zoomMode);
+    if (btn) {
+      btn.classList.toggle('active', state.zoomMode);
+      btn.setAttribute('aria-pressed', String(state.zoomMode));
+    }
     const panel = document.getElementById('wt-zoom-panel');
     if (panel) panel.classList.toggle('show', state.zoomMode);
     window.__webtermZoomMode = state.zoomMode;
@@ -271,11 +303,11 @@
       startRow = row;
       try {
         if (typeof terminal.clearSelection === 'function') terminal.clearSelection();
-        const core = terminal._core;
-        if (core && core._selectionService) {
-          core._selectionService._model.selectionStart = [col, row];
-          core._selectionService._model.selectionEnd = [col, row];
-          core._selectionService.refresh();
+        if (typeof terminal.select === 'function') {
+          const viewportY = terminal.buffer && terminal.buffer.active
+            ? terminal.buffer.active.viewportY
+            : 0;
+          terminal.select(col, viewportY + row, 1);
         }
       } catch (_) {}
       return true;
@@ -285,17 +317,15 @@
       if (!selecting || !state.copyMode) return;
       const { col, row } = cellAt(clientX, clientY);
       try {
-        const core = terminal._core;
-        if (core && core._selectionService) {
-          core._selectionService._model.selectionStart = [startCol, startRow];
-          core._selectionService._model.selectionEnd = [col, row];
-          core._selectionService.refresh(true);
-        } else if (typeof terminal.select === 'function') {
+        if (typeof terminal.select === 'function') {
           const start = startRow * terminal.cols + startCol;
           const end = row * terminal.cols + col;
           const from = Math.min(start, end);
           const len = Math.abs(end - start) + 1;
-          terminal.select(from % terminal.cols, Math.floor(from / terminal.cols), len);
+          const viewportY = terminal.buffer && terminal.buffer.active
+            ? terminal.buffer.active.viewportY
+            : 0;
+          terminal.select(from % terminal.cols, viewportY + Math.floor(from / terminal.cols), len);
         }
       } catch (_) {}
     };
@@ -370,9 +400,15 @@
         <button type="button" id="wt-zoom-in" title="放大">+</button>
         <button type="button" id="wt-zoom-reset" title="重置">100%</button>
       </div>
-      <button type="button" class="wt-fab" id="wt-zoom-btn" title="缩放">🔍</button>
-      <button type="button" class="wt-fab" id="wt-copy-btn" title="复制模式">⎘</button>
-      <button type="button" class="wt-fab" id="wt-paste-btn" title="粘贴">📋</button>
+      <button type="button" class="wt-fab" id="wt-zoom-btn" title="缩放" aria-label="缩放" aria-pressed="false">
+        <svg class="wt-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path><path d="M11 8v6"></path><path d="M8 11h6"></path></svg>
+      </button>
+      <button type="button" class="wt-fab" id="wt-copy-btn" title="复制模式" aria-label="复制模式" aria-pressed="false">
+        <svg class="wt-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
+      </button>
+      <button type="button" class="wt-fab" id="wt-paste-btn" title="粘贴" aria-label="粘贴">
+        <svg class="wt-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1"></rect><path d="M16 4h2a2 2 0 0 1 2 2v4"></path><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6"></path><path d="m16 19 2 2 4-4"></path></svg>
+      </button>
     `;
     document.body.appendChild(stack);
 
@@ -424,6 +460,12 @@
     }, { passive: false, capture: true });
     document.addEventListener('touchend', () => { pinchStartDist = 0; }, { passive: true, capture: true });
 
+    document.addEventListener('wheel', (e) => {
+      if (!state.copyMode) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }, { passive: false, capture: true });
+
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         if (state.copyMode) setCopyMode(false);
@@ -440,10 +482,40 @@
     try {
       await api(`/api/sessions/${sessionId}/release`, {
         method: 'POST',
-        body: JSON.stringify({ token }),
+        body: JSON.stringify({ token, page_id: state.pageId }),
         keepalive: true,
       });
     } catch (_) {}
+  };
+
+  const blockTerminal = (message) => {
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer = null;
+    state.lockToken = '';
+    for (const socket of state.sockets) {
+      try { socket.close(1000, 'terminal lock lost'); } catch (_) {}
+    }
+    try {
+      if (window.term) window.term.options.disableStdin = true;
+    } catch (_) {}
+
+    let blocker = document.getElementById('wt-lock-blocker');
+    if (!blocker) {
+      blocker = document.createElement('div');
+      blocker.id = 'wt-lock-blocker';
+      blocker.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;background:#101214;color:#f1f3f5;font:16px/1.5 system-ui,sans-serif;padding:24px;text-align:center';
+      const content = document.createElement('div');
+      const text = document.createElement('p');
+      text.style.margin = '0 0 14px';
+      const home = document.createElement('a');
+      home.href = '/';
+      home.textContent = '返回主页';
+      home.style.color = '#44c78a';
+      content.append(text, home);
+      blocker.appendChild(content);
+      document.body.appendChild(blocker);
+    }
+    blocker.querySelector('p').textContent = message;
   };
 
   const startHeartbeat = () => {
@@ -453,53 +525,38 @@
       try {
         await api(`/api/sessions/${sessionId}/heartbeat`, {
           method: 'POST',
-          body: JSON.stringify({ token: state.lockToken }),
+          body: JSON.stringify({ token: state.lockToken, page_id: state.pageId }),
         });
       } catch (err) {
-        state.lockToken = '';
-        toast('会话锁已失效（可能被强制释放）', true);
+        blockTerminal('会话锁已失效或已被强制释放，当前页面已断开。');
       }
-    }, 30000);
+    }, 10000);
   };
 
   const acquireLockOrBlock = async () => {
     if (!sessionId) return true;
     const owner = `${navigator.userAgent.slice(0, 40)} @ ${new Date().toLocaleString()}`;
     try {
-      const res = await api(`/api/sessions/${sessionId}/acquire`, {
-        method: 'POST',
-        body: JSON.stringify({ owner }),
-      });
-      state.lockToken = res.token || '';
+      if (state.lockToken) {
+        await api(`/api/sessions/${sessionId}/heartbeat`, {
+          method: 'POST',
+          body: JSON.stringify({ token: state.lockToken, page_id: state.pageId }),
+        });
+      } else {
+        const res = await api(`/api/sessions/${sessionId}/acquire`, {
+          method: 'POST',
+          body: JSON.stringify({ owner }),
+        });
+        state.lockToken = res.token || '';
+      }
       startHeartbeat();
       return true;
     } catch (err) {
-      if (err.status === 409) {
-        const secret = window.prompt('该终端已在其他页面打开，当前已加锁。\n\n可关闭原页面后重试，或输入强制解锁密文：', '');
-        if (secret == null) {
-          document.body.innerHTML = `<div style="min-height:100vh;display:grid;place-items:center;background:#101214;color:#f1f3f5;font:16px/1.5 system-ui,sans-serif;padding:24px;text-align:center">终端已锁定，无法进入。<br><a href="/" style="color:#44c78a">返回主页</a></div>`;
-          return false;
-        }
-        try {
-          await api(`/api/sessions/${sessionId}/force-unlock`, {
-            method: 'POST',
-            body: JSON.stringify({ secret: secret || FORCE_SECRET_DEFAULT }),
-          });
-          const res2 = await api(`/api/sessions/${sessionId}/acquire`, {
-            method: 'POST',
-            body: JSON.stringify({ owner }),
-          });
-          state.lockToken = res2.token || '';
-          startHeartbeat();
-          toast('已强制解锁并进入');
-          return true;
-        } catch (e2) {
-          document.body.innerHTML = `<div style="min-height:100vh;display:grid;place-items:center;background:#101214;color:#fecdd3;font:16px/1.5 system-ui,sans-serif;padding:24px;text-align:center">强制解锁失败：${e2.message}<br><a href="/" style="color:#44c78a">返回主页</a></div>`;
-          return false;
-        }
-      }
-      console.warn('lock acquire failed', err);
-      return true;
+      const message = err.status === 409
+        ? '该终端已在其他页面打开，当前页面已拒绝进入。'
+        : `终端锁校验失败，当前页面已拒绝进入：${err.message}`;
+      blockTerminal(message);
+      return false;
     }
   };
 
