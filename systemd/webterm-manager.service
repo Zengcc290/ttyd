@@ -11,6 +11,8 @@ WorkingDirectory=/home/webterm
 Environment=HOME=/home/webterm
 Environment=WEBTERM_IDLE_TTL_SECONDS=604800
 Environment=WEBTERM_CLEANUP_INTERVAL_SECONDS=600
+Environment=WEBTERM_FORCE_UNLOCK_SECRET=webterm-force-unlock
+Environment=WEBTERM_LOCK_TTL_SECONDS=120
 ExecStart=/usr/bin/python3 /opt/webterm/lib/webterm-manager.py
 Restart=always
 RestartSec=3

@@ -88,3 +88,11 @@ sudo bash scripts/uninstall.sh
 ## 版本
 
 - ttyd: `1.7.7-40e79c7`（本机 `/opt/webterm/bin/ttyd`）
+
+## 终端互斥锁 / 复制粘贴 / 缩放
+
+- 打开终端页会自动加锁（心跳 30s，TTL 120s），关闭页面自动释放
+- 首页点击“继续”时会向后端查询锁状态；已锁则拒绝并提示强制解锁
+- 强制解锁默认密文：`webterm-force-unlock`（可用环境变量 `WEBTERM_FORCE_UNLOCK_SECRET` 覆盖）
+- 终端页右上角悬浮按钮：🔍 缩放、⎘ 复制模式、📋 粘贴弹窗
+- 复制模式会禁用触摸滚动；退出后恢复

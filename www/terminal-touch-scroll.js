@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = 5;
+  const VERSION = 7;
 
   const install = () => {
     const terminal = window.term;
@@ -123,6 +123,11 @@
     };
 
     screen.addEventListener('touchstart', (event) => {
+      if (window.__webtermCopyMode) {
+        lastY = null;
+        remainder = 0;
+        return;
+      }
       if (event.touches.length !== 1) {
         lastY = null;
         remainder = 0;
@@ -133,6 +138,12 @@
     }, { passive: true, capture: true });
 
     screen.addEventListener('touchmove', (event) => {
+      // Copy mode: selection handlers own the gesture; zoom-mode single finger still scrolls unless copy.
+      if (window.__webtermCopyMode) {
+        lastY = null;
+        remainder = 0;
+        return;
+      }
       if (lastY === null || event.touches.length !== 1) return;
 
       const touch = event.touches[0];

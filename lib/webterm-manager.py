@@ -23,6 +23,78 @@ IDLE_TTL = int(os.environ.get("WEBTERM_IDLE_TTL_SECONDS", "604800"))
 CLEANUP_INTERVAL = int(os.environ.get("WEBTERM_CLEANUP_INTERVAL_SECONDS", "600"))
 LOCK = threading.RLock()
 
+FORCE_UNLOCK_SECRET = os.environ.get("WEBTERM_FORCE_UNLOCK_SECRET", "webterm-force-unlock")
+LOCK_TTL_SECONDS = int(os.environ.get("WEBTERM_LOCK_TTL_SECONDS", "120"))
+
+
+def lock_path(session_id: str) -> Path:
+    return STATE_DIR / f"{session_id}.lock.json"
+
+
+def read_lock(session_id: str) -> dict | None:
+    path = lock_path(session_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        return data
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def write_lock(session_id: str, token: str, owner: str = "") -> dict:
+    now = int(time.time())
+    data = {
+        "session_id": session_id,
+        "token": token,
+        "owner": (owner or "")[:120],
+        "locked_at": now,
+        "heartbeat_at": now,
+        "expires_at": now + LOCK_TTL_SECONDS,
+    }
+    target = lock_path(session_id)
+    temp = target.with_suffix(".lock.json.tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(temp, target)
+    return data
+
+
+def clear_lock(session_id: str) -> None:
+    lock_path(session_id).unlink(missing_ok=True)
+
+
+def lock_active(lock: dict | None) -> bool:
+    if not lock:
+        return False
+    try:
+        expires = int(lock.get("expires_at", 0))
+    except (TypeError, ValueError):
+        return False
+    if expires <= int(time.time()):
+        return False
+    return bool(lock.get("token"))
+
+
+def public_lock_info(lock: dict | None) -> dict:
+    active = lock_active(lock)
+    if not active:
+        return {"locked": False}
+    return {
+        "locked": True,
+        "owner": str(lock.get("owner") or ""),
+        "locked_at": int(lock.get("locked_at", 0)),
+        "heartbeat_at": int(lock.get("heartbeat_at", 0)),
+        "expires_at": int(lock.get("expires_at", 0)),
+        "ttl": LOCK_TTL_SECONDS,
+    }
+
+
+def purge_expired_lock(session_id: str) -> None:
+    lock = read_lock(session_id)
+    if lock and not lock_active(lock):
+        clear_lock(session_id)
+
+
 
 def run_tmux(*args: str, check: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -102,6 +174,9 @@ def session_record(data: dict) -> dict:
     except FileNotFoundError:
         last_active = int(data.get("created", time.time()))
     running = has_session(session_id)
+    purge_expired_lock(session_id)
+    lock = read_lock(session_id)
+    lock_info = public_lock_info(lock)
     return {
         "id": session_id,
         "name": str(data.get("name") or "未命名终端")[:80],
@@ -110,6 +185,8 @@ def session_record(data: dict) -> dict:
         "running": running,
         "clients": attached_clients(session_id) if running else 0,
         "expires_after": IDLE_TTL,
+        "locked": lock_info.get("locked", False),
+        "lock": lock_info,
     }
 
 
@@ -142,6 +219,7 @@ def cleanup_stale() -> int:
             kill_tmux(session_id)
             path.unlink(missing_ok=True)
             marker.unlink(missing_ok=True)
+            lock_path(session_id).unlink(missing_ok=True)
             removed += 1
     return removed
 
@@ -196,6 +274,17 @@ class Handler(BaseHTTPRequestHandler):
             with state_lock():
                 self.send_json(200, {"sessions": list_sessions(), "idle_ttl": IDLE_TTL})
             return
+        lock_match = re.fullmatch(r"/api/sessions/(s-[a-f0-9]{16})/lock", path)
+        if lock_match:
+            session_id = lock_match.group(1)
+            with state_lock():
+                data = read_meta(meta_path(session_id))
+                if not data and not lock_path(session_id).exists():
+                    self.send_json(404, {"error": "session not found"})
+                    return
+                purge_expired_lock(session_id)
+                self.send_json(200, {"id": session_id, **public_lock_info(read_lock(session_id))})
+            return
         if path == "/api/health":
             self.send_json(200, {"ok": True})
             return
@@ -219,6 +308,71 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(201, session_record(data))
             return
 
+        lock_action = re.fullmatch(r"/api/sessions/(s-[a-f0-9]{16})/(acquire|heartbeat|release|force-unlock)", path)
+        if lock_action:
+            session_id, action = lock_action.groups()
+            with state_lock():
+                data = read_meta(meta_path(session_id))
+                if not data:
+                    self.send_json(404, {"error": "session not found"})
+                    return
+                purge_expired_lock(session_id)
+                current = read_lock(session_id)
+
+                if action == "acquire":
+                    owner = str(payload.get("owner") or "").strip()[:120]
+                    if lock_active(current):
+                        self.send_json(409, {
+                            "error": "session locked",
+                            "id": session_id,
+                            **public_lock_info(current),
+                        })
+                        return
+                    token = secrets.token_hex(16)
+                    lock = write_lock(session_id, token, owner)
+                    self.send_json(200, {
+                        "ok": True,
+                        "id": session_id,
+                        "token": token,
+                        **public_lock_info(lock),
+                    })
+                    return
+
+                if action == "heartbeat":
+                    token = str(payload.get("token") or "")
+                    if not lock_active(current) or current.get("token") != token:
+                        self.send_json(409, {
+                            "error": "lock not held",
+                            "id": session_id,
+                            **public_lock_info(current),
+                        })
+                        return
+                    lock = write_lock(session_id, token, str(current.get("owner") or ""))
+                    self.send_json(200, {"ok": True, "id": session_id, **public_lock_info(lock)})
+                    return
+
+                if action == "release":
+                    token = str(payload.get("token") or "")
+                    if current and current.get("token") == token:
+                        clear_lock(session_id)
+                        self.send_json(200, {"ok": True, "id": session_id, "locked": False})
+                        return
+                    if not lock_active(current):
+                        clear_lock(session_id)
+                        self.send_json(200, {"ok": True, "id": session_id, "locked": False})
+                        return
+                    self.send_json(403, {"error": "token mismatch", "id": session_id, **public_lock_info(current)})
+                    return
+
+                if action == "force-unlock":
+                    secret = str(payload.get("secret") or "")
+                    if secret != FORCE_UNLOCK_SECRET:
+                        self.send_json(403, {"error": "invalid force unlock secret"})
+                        return
+                    clear_lock(session_id)
+                    self.send_json(200, {"ok": True, "id": session_id, "locked": False, "forced": True})
+                    return
+
         match = re.fullmatch(r"/api/sessions/(s-[a-f0-9]{16})/(reset|rename)", path)
         if not match:
             self.send_json(404, {"error": "not found"})
@@ -233,6 +387,7 @@ class Handler(BaseHTTPRequestHandler):
             if action == "reset":
                 kill_tmux(session_id)
                 activity_path(session_id).touch()
+                clear_lock(session_id)
             elif action == "rename":
                 name = str(payload.get("name") or "").strip()[:80]
                 if not name:
@@ -255,6 +410,7 @@ class Handler(BaseHTTPRequestHandler):
             kill_tmux(session_id)
             meta_path(session_id).unlink(missing_ok=True)
             activity_path(session_id).unlink(missing_ok=True)
+            clear_lock(session_id)
         self.send_json(200, {"deleted": True, "id": session_id})
 
 
