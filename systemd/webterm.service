@@ -1,0 +1,21 @@
+[Unit]
+Description=Persistent multi-session browser terminal (ttyd + tmux)
+After=network-online.target webterm-manager.service
+Wants=network-online.target
+Requires=webterm-manager.service
+
+[Service]
+Type=simple
+User=webterm
+Group=webterm
+WorkingDirectory=/home/webterm
+Environment=HOME=/home/webterm
+ExecStart=/opt/webterm/bin/ttyd --interface 127.0.0.1 --port 7681 --writable --url-arg --base-path /terminal --ping-interval 15 --client-option scrollback=50000 /opt/webterm/bin/webterm-session
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+KillMode=process
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SESSION_ID="${1:-}"
+STATE_DIR="/home/webterm/.local/share/webterm-sessions"
+TMUX_SOCKET="$STATE_DIR/tmux.sock"
+LOCK_FILE="$STATE_DIR/.lock"
+
+if [[ ! "$SESSION_ID" =~ ^s-[a-f0-9]{16}$ ]]; then
+    echo "无效的终端会话编号。请返回终端首页重新打开。"
+    sleep 5
+    exit 2
+fi
+
+mkdir -p "$STATE_DIR"
+META_FILE="$STATE_DIR/${SESSION_ID}.json"
+ACTIVITY_FILE="$STATE_DIR/${SESSION_ID}.last"
+
+exec 9>"$LOCK_FILE"
+flock -x 9
+
+if [[ ! -f "$META_FILE" ]]; then
+    CREATED_AT="$(date +%s)"
+    META_TEMP="${META_FILE}.tmp.$$"
+    printf '{"id":"%s","name":"恢复的终端","created":%s}\n' \
+        "$SESSION_ID" "$CREATED_AT" > "$META_TEMP"
+    mv "$META_TEMP" "$META_FILE"
+fi
+
+if ! tmux -S "$TMUX_SOCKET" has-session -t "$SESSION_ID" 2>/dev/null; then
+    tmux -S "$TMUX_SOCKET" new-session -d -s "$SESSION_ID" -c /home/webterm
+fi
+
+tmux -S "$TMUX_SOCKET" set-option -g mouse on
+tmux -S "$TMUX_SOCKET" set-window-option -g history-limit 100000
+while IFS= read -r WINDOW_ID; do
+    tmux -S "$TMUX_SOCKET" set-window-option -t "$WINDOW_ID" history-limit 100000
+done < <(tmux -S "$TMUX_SOCKET" list-windows -t "$SESSION_ID" -F '#{window_id}')
+
+touch "$ACTIVITY_FILE"
+flock -u 9
+exec 9>&-
+
+keep_activity_alive() {
+    while true; do
+        touch "$ACTIVITY_FILE"
+        sleep 60
+    done
+}
+
+keep_activity_alive &
+KEEPALIVE_PID=$!
+trap 'kill "$KEEPALIVE_PID" 2>/dev/null || true' EXIT HUP INT TERM
+
+tmux -S "$TMUX_SOCKET" attach-session -t "$SESSION_ID"

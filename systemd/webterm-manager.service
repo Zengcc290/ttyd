@@ -1,0 +1,23 @@
+[Unit]
+Description=Web terminal session manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webterm
+Group=webterm
+WorkingDirectory=/home/webterm
+Environment=HOME=/home/webterm
+Environment=WEBTERM_IDLE_TTL_SECONDS=604800
+Environment=WEBTERM_CLEANUP_INTERVAL_SECONDS=600
+ExecStart=/usr/bin/python3 /opt/webterm/lib/webterm-manager.py
+Restart=always
+RestartSec=3
+KillMode=process
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

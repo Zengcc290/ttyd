@@ -1,0 +1,9 @@
+etc/credentials
+etc/htpasswd
+log/*
+!log/.gitkeep
+state/*
+!state/.gitkeep
+*.log
+.env
+.DS_Store

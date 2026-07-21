@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>服务器终端</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #171a1d;
+      --panel-2: #202428;
+      --line: #343a40;
+      --text: #f1f3f5;
+      --muted: #9ca3aa;
+      --green: #44c78a;
+      --red: #fb7185;
+      --yellow: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    .shell { width: min(1100px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0 72px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .logo { width: 46px; height: 46px; display: grid; place-items: center; border: 1px solid #3c4641; border-radius: 6px; background: #1c211f; box-shadow: 0 16px 40px rgba(0,0,0,.3); font: 700 22px/1 ui-monospace, monospace; color: var(--green); }
+    h1 { margin: 0; font-size: 30px; letter-spacing: 0; }
+    .subtitle { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+    button { font: inherit; }
+    .primary { border: 0; border-radius: 6px; padding: 12px 18px; color: #04150f; background: var(--green); font-weight: 750; cursor: pointer; box-shadow: 0 10px 30px rgba(68,199,138,.16); }
+    .primary:hover { filter: brightness(1.08); }
+    .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+    .metric { padding: 17px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+    .metric strong { display: block; font-size: 23px; margin-bottom: 3px; }
+    .metric span { color: var(--muted); font-size: 13px; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 26px 0 12px; }
+    h2 { margin: 0; font-size: 17px; }
+    .hint { color: var(--muted); font-size: 13px; }
+    .sessions { display: grid; gap: 12px; }
+    .card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 20px; padding: 18px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 14px 40px rgba(0,0,0,.18); }
+    .title-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .status { width: 9px; height: 9px; border-radius: 50%; background: #526071; flex: none; }
+    .status.running { background: var(--green); box-shadow: 0 0 0 5px rgba(54,211,153,.1); }
+    .session-name { margin: 0; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+    .btn { border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px; color: var(--text); background: var(--panel-2); cursor: pointer; }
+    .btn:hover { border-color: #58615c; background: #272c30; }
+    .btn.open { color: #061610; border-color: transparent; background: var(--green); font-weight: 700; }
+    .btn.danger { color: #fecdd3; }
+    .empty { padding: 48px 22px; border: 1px dashed #3a4146; border-radius: 6px; text-align: center; color: var(--muted); background: var(--panel); }
+    .empty strong { display: block; color: var(--text); font-size: 17px; margin-bottom: 8px; }
+    .toast { position: fixed; right: 20px; bottom: 20px; max-width: min(380px, calc(100% - 40px)); padding: 13px 16px; border-radius: 6px; background: #202428; border: 1px solid #485057; box-shadow: 0 18px 50px rgba(0,0,0,.4); opacity: 0; transform: translateY(12px); pointer-events: none; transition: .2s ease; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.error { border-color: #7f3040; color: #fecdd3; }
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 22px, 1100px); padding-top: 26px; }
+      h1 { font-size: 24px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .primary { width: 100%; }
+      .summary { grid-template-columns: 1fr; }
+      .card { grid-template-columns: 1fr; }
+      .actions { justify-content: flex-start; }
+      .btn { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand">
+        <div class="logo">&gt;_</div>
+        <div>
+          <h1>服务器终端</h1>
+          <p class="subtitle">webterm@armbian</p>
+        </div>
+      </div>
+      <button class="primary" id="newSession">＋ 新建独立终端</button>
+    </header>
+
+    <section class="summary">
+      <div class="metric"><strong id="totalCount">—</strong><span>终端总数</span></div>
+      <div class="metric"><strong id="runningCount">—</strong><span>正在运行</span></div>
+      <div class="metric"><strong id="clientCount">—</strong><span>已连接窗口</span></div>
+    </section>
+
+    <div class="toolbar">
+      <h2>我的终端</h2>
+      <span class="hint" id="lastRefresh">正在连接…</span>
+    </div>
+    <section class="sessions" id="sessions"></section>
+
+  </main>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const sessionsEl = document.getElementById('sessions');
+    const toastEl = document.getElementById('toast');
+    let sessions = [];
+
+    function toast(message, error = false) {
+      toastEl.textContent = message;
+      toastEl.className = `toast show${error ? ' error' : ''}`;
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => toastEl.className = 'toast', 3200);
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Webterm-Request': '1',
+          ...(options.headers || {})
+        }
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `请求失败 (${response.status})`);
+      return body;
+    }
+
+    function formatTime(timestamp) {
+      return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(timestamp * 1000));
+    }
+
+    function relativeTime(timestamp) {
+      const seconds = Math.max(0, Math.floor(Date.now() / 1000 - timestamp));
+      if (seconds < 60) return '刚刚';
+      if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+      if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+      return `${Math.floor(seconds / 86400)} 天前`;
+    }
+
+    function terminalUrl(id) {
+      const url = new URL('/terminal/', location.origin);
+      url.searchParams.append('arg', id);
+      return url.toString();
+    }
+
+    function openSession(id, targetWindow = undefined) {
+      const destination = terminalUrl(id);
+      if (targetWindow === null) window.location.assign(destination);
+      else if (targetWindow) targetWindow.location = destination;
+      else window.open(destination, '_blank', 'noopener');
+    }
+
+    function button(label, className, action) {
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = `btn ${className || ''}`;
+      el.textContent = label;
+      el.addEventListener('click', action);
+      return el;
+    }
+
+    function render() {
+      document.getElementById('totalCount').textContent = sessions.length;
+      document.getElementById('runningCount').textContent = sessions.filter(item => item.running).length;
+      document.getElementById('clientCount').textContent = sessions.reduce((sum, item) => sum + item.clients, 0);
+      sessionsEl.replaceChildren();
+
+      if (!sessions.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.innerHTML = '<strong>暂无终端会话</strong>';
+        sessionsEl.append(empty);
+        return;
+      }
+
+      for (const session of sessions) {
+        const card = document.createElement('article');
+        card.className = 'card';
+        const info = document.createElement('div');
+        const titleRow = document.createElement('div');
+        titleRow.className = 'title-row';
+        const status = document.createElement('span');
+        status.className = `status${session.running ? ' running' : ''}`;
+        const title = document.createElement('h3');
+        title.className = 'session-name';
+        title.textContent = session.name;
+        titleRow.append(status, title);
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.append(
+          Object.assign(document.createElement('span'), { textContent: session.running ? '会话运行中' : '下次打开将新建 Shell' }),
+          Object.assign(document.createElement('span'), { textContent: `${session.clients} 个窗口已连接` }),
+          Object.assign(document.createElement('span'), { textContent: `最后活动：${relativeTime(session.last_active)}` }),
+          Object.assign(document.createElement('span'), { textContent: `创建：${formatTime(session.created)}` })
+        );
+        info.append(titleRow, meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+        actions.append(
+          button('继续', 'open', () => openSession(session.id)),
+          button('重置', '', async () => {
+            if (!confirm(`确定清空“${session.name}”吗？其中正在运行的程序也会终止。`)) return;
+            const popup = window.open('', '_blank');
+            if (popup) popup.opener = null;
+            try {
+              await api(`/api/sessions/${session.id}/reset`, { method: 'POST', body: '{}' });
+              openSession(session.id, popup);
+              toast('终端已重置');
+              await refresh();
+            } catch (error) {
+              if (popup) popup.close();
+              toast(error.message, true);
+            }
+          }),
+          button('删除', 'danger', async () => {
+            if (!confirm(`确定删除“${session.name}”吗？此操作会终止其中的程序。`)) return;
+            try {
+              await api(`/api/sessions/${session.id}`, { method: 'DELETE' });
+              toast('终端已删除');
+              await refresh();
+            } catch (error) { toast(error.message, true); }
+          })
+        );
+        card.append(info, actions);
+        sessionsEl.append(card);
+      }
+    }
+
+    async function refresh() {
+      try {
+        const data = await api('/api/sessions');
+        sessions = data.sessions;
+        render();
+        document.getElementById('lastRefresh').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+      } catch (error) {
+        document.getElementById('lastRefresh').textContent = '连接失败';
+        toast(error.message, true);
+      }
+    }
+
+    document.getElementById('newSession').addEventListener('click', async () => {
+      const popup = window.open('', '_blank');
+      if (popup) popup.opener = null;
+      try {
+        const session = await api('/api/sessions', { method: 'POST', body: '{}' });
+        openSession(session.id, popup);
+        toast('已创建独立终端');
+        await refresh();
+      } catch (error) {
+        if (popup) popup.close();
+        toast(error.message, true);
+      }
+    });
+
+    refresh();
+    setInterval(refresh, 15000);
+  </script>
+</body>
+</html>
