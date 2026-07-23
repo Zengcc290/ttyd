@@ -56,7 +56,7 @@
       frame[0] = 48; // ttyd INPUT command
       frame.set(bytes, 1);
       for (const socket of sockets) {
-        if (socket.readyState === WebSocket.OPEN) {
+        if (socket.readyState === 1) {
           socket.send(frame);
           return true;
         }
