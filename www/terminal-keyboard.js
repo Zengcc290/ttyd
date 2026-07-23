@@ -32,18 +32,34 @@
 
   const writeToPty = (data) => {
     const terminal = window.term;
-    if (!terminal || !data) return false;
+    if (!data) return false;
+    if (terminal) {
+      try {
+        const core = terminal._core;
+        if (core && core._coreService && typeof core._coreService.triggerDataEvent === 'function') {
+          core._coreService.triggerDataEvent(data, true);
+          return true;
+        }
+      } catch (_) {}
+      try {
+        if (typeof terminal.paste === 'function') {
+          terminal.paste(data);
+          return true;
+        }
+      } catch (_) {}
+    }
     try {
-      const core = terminal._core;
-      if (core && core._coreService && typeof core._coreService.triggerDataEvent === 'function') {
-        core._coreService.triggerDataEvent(data, true);
-        return true;
-      }
-    } catch (_) {}
-    try {
-      if (typeof terminal.paste === 'function') {
-        terminal.paste(data);
-        return true;
+      const sockets = window.__webtermControls && window.__webtermControls.sockets;
+      if (!sockets || !window.TextEncoder) return false;
+      const bytes = new TextEncoder().encode(data);
+      const frame = new Uint8Array(bytes.length + 1);
+      frame[0] = 48; // ttyd INPUT command
+      frame.set(bytes, 1);
+      for (const socket of sockets) {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(frame);
+          return true;
+        }
       }
     } catch (_) {}
     return false;
