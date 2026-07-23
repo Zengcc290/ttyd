@@ -41,12 +41,6 @@
           return true;
         }
       } catch (_) {}
-      try {
-        if (typeof terminal.paste === 'function') {
-          terminal.paste(data);
-          return true;
-        }
-      } catch (_) {}
     }
     try {
       const sockets = window.__webtermControls && window.__webtermControls.sockets;
