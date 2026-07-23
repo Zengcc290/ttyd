@@ -171,11 +171,22 @@
 
     let pendingOpen = null; // {id, targetWindow}
 
-    function openSession(id, lockToken, targetWindow = undefined) {
+    function openTerminalTarget() {
+      const targetWindow = window.open('', '_blank');
+      if (targetWindow) {
+        try { targetWindow.opener = null; } catch (_) {}
+      }
+      return targetWindow;
+    }
+
+    function openSession(id, lockToken, targetWindow) {
       const destination = terminalUrl(id, lockToken);
-      if (targetWindow === null) window.location.assign(destination);
-      else if (targetWindow) targetWindow.location = destination;
-      else window.open(destination, '_blank', 'noopener');
+      if (!targetWindow || targetWindow.closed) {
+        toast('浏览器阻止了新终端标签页，请允许此站点打开新标签页后重试。', true);
+        return false;
+      }
+      targetWindow.location.replace(destination);
+      return true;
     }
 
     function showForceUnlock(id, targetWindow, lockInfo = {}) {
@@ -204,7 +215,8 @@
       try {
         const status = await api(`/api/sessions/${id}/lock`);
         if (status.locked) {
-          showForceUnlock(id, targetWindow, status);
+          closeTarget(targetWindow);
+          showForceUnlock(id, undefined, status);
           return false;
         }
         // Acquire is the authoritative, atomic check against concurrent devices.
@@ -213,11 +225,11 @@
           method: 'POST',
           body: JSON.stringify({ owner })
         });
-        openSession(id, acquired.token, targetWindow);
-        return true;
+        return openSession(id, acquired.token, targetWindow);
       } catch (error) {
         if (error.status === 409) {
-          showForceUnlock(id, targetWindow, error.body || {});
+          closeTarget(targetWindow);
+          showForceUnlock(id, undefined, error.body || {});
           return false;
         }
         closeTarget(targetWindow);
@@ -276,28 +288,50 @@
         actions.className = 'actions';
         actions.append(
           button(session.locked ? '已锁定' : '继续', session.locked ? 'locked' : 'open', async () => {
-            const popup = window.open('', '_blank');
-            if (popup) popup.opener = null;
-            await tryOpenSession(session.id, popup || null);
+            const targetWindow = openTerminalTarget();
+            if (!targetWindow) {
+              toast('浏览器阻止了新终端标签页，请允许此站点打开新标签页后重试。', true);
+              return;
+            }
+            await tryOpenSession(session.id, targetWindow);
           }),
           button('强制解锁', '', async () => {
-            showForceUnlock(session.id, undefined, session.lock || {});
+            try {
+              const lockInfo = await api(`/api/sessions/${session.id}/lock`);
+              if (lockInfo.locked) showForceUnlock(session.id, null, lockInfo);
+              else {
+                toast('该终端当前未加锁');
+                await refresh();
+              }
+            } catch (error) {
+              toast(`锁状态校验失败：${error.message}`, true);
+            }
           }),
           button('重置', '', async () => {
-            if (session.locked) {
-              showForceUnlock(session.id, undefined, session.lock || {});
+            let lockInfo;
+            try {
+              lockInfo = await api(`/api/sessions/${session.id}/lock`);
+            } catch (error) {
+              toast(`锁状态校验失败：${error.message}`, true);
+              return;
+            }
+            if (lockInfo.locked) {
+              showForceUnlock(session.id, null, lockInfo);
               return;
             }
             if (!confirm(`确定清空“${session.name}”吗？其中正在运行的程序也会终止。`)) return;
-            const popup = window.open('', '_blank');
-            if (popup) popup.opener = null;
+            const targetWindow = openTerminalTarget();
+            if (!targetWindow) {
+              toast('浏览器阻止了新终端标签页，请允许此站点打开新标签页后重试。', true);
+              return;
+            }
             try {
               await api(`/api/sessions/${session.id}/reset`, { method: 'POST', body: '{}' });
-              await tryOpenSession(session.id, popup);
+              await tryOpenSession(session.id, targetWindow);
               toast('终端已重置');
               await refresh();
             } catch (error) {
-              if (popup) popup.close();
+              closeTarget(targetWindow);
               if (error.status === 409) showForceUnlock(session.id, undefined, error.body || {});
               else toast(error.message, true);
             }
@@ -316,28 +350,39 @@
       }
     }
 
-    async function refresh() {
-      try {
-        const data = await api('/api/sessions');
-        sessions = data.sessions;
-        render();
-        document.getElementById('lastRefresh').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-      } catch (error) {
-        document.getElementById('lastRefresh').textContent = '连接失败';
-        toast(error.message, true);
-      }
+    let refreshRequest = null;
+
+    function refresh() {
+      if (refreshRequest) return refreshRequest;
+      refreshRequest = (async () => {
+        try {
+          const data = await api('/api/sessions');
+          sessions = data.sessions;
+          render();
+          document.getElementById('lastRefresh').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+        } catch (error) {
+          document.getElementById('lastRefresh').textContent = '连接失败';
+          toast(error.message, true);
+        }
+      })().finally(() => {
+        refreshRequest = null;
+      });
+      return refreshRequest;
     }
 
     document.getElementById('newSession').addEventListener('click', async () => {
-      const popup = window.open('', '_blank');
-      if (popup) popup.opener = null;
+      const targetWindow = openTerminalTarget();
+      if (!targetWindow) {
+        toast('浏览器阻止了新终端标签页，请允许此站点打开新标签页后重试。', true);
+        return;
+      }
       try {
         const session = await api('/api/sessions', { method: 'POST', body: '{}' });
-        await tryOpenSession(session.id, popup);
+        await tryOpenSession(session.id, targetWindow);
         toast('已创建独立终端');
         await refresh();
       } catch (error) {
-        if (popup) popup.close();
+        closeTarget(targetWindow);
         toast(error.message, true);
       }
     });
@@ -359,10 +404,12 @@
 
       const request = pendingOpen;
       let targetWindow = request.targetWindow;
-      if (targetWindow === undefined || (targetWindow && targetWindow.closed)) {
-        targetWindow = window.open('', '_blank');
-        if (targetWindow) targetWindow.opener = null;
-        if (!targetWindow) targetWindow = null;
+      if (!targetWindow || targetWindow.closed) {
+        targetWindow = openTerminalTarget();
+        if (!targetWindow) {
+          toast('浏览器阻止了新终端标签页，请允许此站点打开新标签页后重试。', true);
+          return;
+        }
       }
       const confirmButton = document.getElementById('forceUnlockConfirm');
       confirmButton.disabled = true;
@@ -391,7 +438,6 @@
     });
 
     refresh();
-    setInterval(refresh, 15000);
   </script>
 </body>
 </html>
