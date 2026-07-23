@@ -96,4 +96,5 @@ sudo bash scripts/uninstall.sh
 - 锁心跳间隔 10s、TTL 120s，关闭页面自动释放；强制解锁会断开旧终端连接
 - 强制解锁密文在安装时随机生成，也可通过 `WEBTERM_FORCE_UNLOCK_SECRET` 指定；安装后见 `/opt/webterm/etc/credentials`
 - 终端页右上角悬浮按钮：🔍 缩放、⎘ 复制模式、📋 粘贴弹窗
+- 终端页右上角透明键盘按钮：可发送功能键、方向键、导航键和 Ctrl/Alt/Shift/Meta 组合键；展开时自动缩短终端区域，命令行输入框不会被面板遮挡
 - 复制模式会禁用触摸滚动；退出后恢复
