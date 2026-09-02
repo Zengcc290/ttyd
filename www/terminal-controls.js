@@ -1,5 +1,5 @@
 (() => {
-  const VERSION = 8;
+  const VERSION = 9;
 
   const qs = new URLSearchParams(location.search);
   const pageId = (() => {
@@ -27,6 +27,9 @@
     zoomMode: false,
     zoom: 1,
     heartbeatTimer: null,
+    heartbeatInFlight: false,
+    heartbeatFailures: 0,
+    releasing: false,
     sockets: new Set(),
   });
 
@@ -475,17 +478,28 @@
     });
   };
 
-  const releaseLock = async () => {
-    if (!sessionId || !state.lockToken) return;
+  const releaseLock = () => {
+    if (!sessionId || !state.lockToken || state.releasing) return;
     const token = state.lockToken;
+    state.releasing = true;
     state.lockToken = '';
-    try {
-      await api(`/api/sessions/${sessionId}/release`, {
+    const payload = JSON.stringify({ token, page_id: state.pageId });
+    const url = `/api/sessions/${sessionId}/release?beacon=1`;
+    let sent = false;
+    if (typeof navigator.sendBeacon === 'function') {
+      try {
+        sent = navigator.sendBeacon(url, new Blob([payload], { type: 'application/json' }));
+      } catch (_) {}
+    }
+    if (!sent) {
+      fetch(`/api/sessions/${sessionId}/release`, {
         method: 'POST',
-        body: JSON.stringify({ token, page_id: state.pageId }),
+        body: payload,
+        cache: 'no-store',
         keepalive: true,
-      });
-    } catch (_) {}
+        headers: { 'Content-Type': 'application/json', 'X-Webterm-Request': '1' },
+      }).catch(() => {});
+    }
   };
 
   const blockTerminal = (message) => {
@@ -518,19 +532,31 @@
     blocker.querySelector('p').textContent = message;
   };
 
+  const heartbeatOnce = async () => {
+    if (!sessionId || !state.lockToken || state.releasing || state.heartbeatInFlight) return;
+    state.heartbeatInFlight = true;
+    try {
+      await api(`/api/sessions/${sessionId}/heartbeat`, {
+        method: 'POST',
+        body: JSON.stringify({ token: state.lockToken, page_id: state.pageId }),
+      });
+      state.heartbeatFailures = 0;
+    } catch (err) {
+      // A 409/404 is authoritative: the lock was force-released or the
+      // session was deleted. Network and 5xx errors are transient and retry.
+      if (err.status === 409 || err.status === 404) {
+        blockTerminal('会话锁已被强制释放或会话已删除，当前页面已断开。');
+      } else {
+        state.heartbeatFailures += 1;
+      }
+    } finally {
+      state.heartbeatInFlight = false;
+    }
+  };
+
   const startHeartbeat = () => {
     if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer = setInterval(async () => {
-      if (!sessionId || !state.lockToken) return;
-      try {
-        await api(`/api/sessions/${sessionId}/heartbeat`, {
-          method: 'POST',
-          body: JSON.stringify({ token: state.lockToken, page_id: state.pageId }),
-        });
-      } catch (err) {
-        blockTerminal('会话锁已失效或已被强制释放，当前页面已断开。');
-      }
-    }, 10000);
+    state.heartbeatTimer = setInterval(heartbeatOnce, 10000);
   };
 
   const acquireLockOrBlock = async () => {
@@ -570,8 +596,18 @@
     }, 50);
     setTimeout(() => clearInterval(timer), 60000);
 
-    window.addEventListener('pagehide', () => { releaseLock(); }, { capture: true });
-    window.addEventListener('beforeunload', () => { releaseLock(); });
+    window.addEventListener('pagehide', (event) => {
+      // A persisted page is going into the back-forward cache, not closing.
+      if (!event.persisted) releaseLock();
+    }, { capture: true });
+    window.addEventListener('beforeunload', releaseLock);
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted) heartbeatOnce();
+    });
+    window.addEventListener('online', heartbeatOnce);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') heartbeatOnce();
+    });
   };
 
   if (document.readyState === 'loading') {

@@ -11,8 +11,9 @@ WEBTERM_HOME="${WEBTERM_HOME:-/home/${WEBTERM_USER}}"
 WEB_USER="${WEB_USER:-admin}"
 WEB_PASS="${WEB_PASS:-}"
 LINUX_PASS="${LINUX_PASS:-}"
-FORCE_UNLOCK_SECRET="${WEBTERM_FORCE_UNLOCK_SECRET:-}"
+FORCE_UNLOCK_SECRET="${WEBTERM_FORCE_UNLOCK_SECRET:-060806}"
 SKIP_OPENRESTY="${SKIP_OPENRESTY:-0}"
+TTYD_BIN="${TTYD_BIN:-${ROOT_DIR}/bin/ttyd}"
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -46,16 +47,20 @@ if ! command -v tmux >/dev/null 2>&1; then
     exit 1
   fi
 fi
+if [[ ! -x "${TTYD_BIN}" ]]; then
+  echo "ttyd 二进制不存在或不可执行: ${TTYD_BIN}" >&2
+  exit 1
+fi
 
 ARCH="$(uname -m)"
-if [[ "$ARCH" != "aarch64" && "$ARCH" != "arm64" ]]; then
+if [[ "$ARCH" != "aarch64" && "$ARCH" != "arm64" && "${TTYD_BIN}" == "${ROOT_DIR}/bin/ttyd" ]]; then
   echo "警告: 自带 bin/ttyd 为 ARM aarch64 静态二进制。当前架构: $ARCH"
   echo "若服务无法启动，请替换 bin/ttyd 为对应架构版本。"
 fi
 
 WEB_PASS="${WEB_PASS:-$(rand_pass)}"
 LINUX_PASS="${LINUX_PASS:-$(rand_pass)}"
-FORCE_UNLOCK_SECRET="${FORCE_UNLOCK_SECRET:-$(rand_pass)}"
+FORCE_UNLOCK_SECRET="${FORCE_UNLOCK_SECRET:-060806}"
 if [[ "${FORCE_UNLOCK_SECRET}" == *$'\n'* || "${FORCE_UNLOCK_SECRET}" == *$'\r'* ]]; then
   echo "WEBTERM_FORCE_UNLOCK_SECRET 不能包含换行。" >&2
   exit 1
@@ -76,6 +81,7 @@ rsync -a --delete \
   --exclude 'README.md' \
   --exclude '.gitignore' \
   "${ROOT_DIR}/" "${INSTALL_DIR}/"
+install -m 755 "${TTYD_BIN}" "${INSTALL_DIR}/bin/ttyd"
 
 mkdir -p "${INSTALL_DIR}"/{log,state,etc}
 chmod 750 "${INSTALL_DIR}/etc"
@@ -136,7 +142,7 @@ if [[ "${SKIP_OPENRESTY}" != "1" && -x "${INSTALL_DIR}/bin/sync-openresty.sh" ]]
     "${INSTALL_DIR}/bin/sync-openresty.sh" || echo "sync-openresty 失败，可稍后手动执行"
   else
     echo "未检测到 /opt/1panel/www，跳过 OpenResty 同步。"
-    echo "本地认证入口配置见: ${INSTALL_DIR}/nginx/webterm-local.conf (127.0.0.1:7682)"
+    echo "公网认证入口配置见: ${INSTALL_DIR}/nginx/webterm-local.conf (0.0.0.0:7682)"
   fi
 fi
 
@@ -156,10 +162,10 @@ Linux 用户:
   用户: ${WEBTERM_USER}
   密码: ${LINUX_PASS}
 
-本机端口:
+服务端口:
   7681  ttyd (仅 127.0.0.1)
   7684  session manager API
-  7682  OpenResty 本地认证入口（若已同步）
+  7682  OpenResty 公网认证入口（若已同步）
 
 常用命令:
   systemctl status webterm webterm-manager

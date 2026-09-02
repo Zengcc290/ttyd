@@ -1,7 +1,6 @@
 import importlib.util
 import json
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -20,7 +19,6 @@ class TerminalLockTests(unittest.TestCase):
         manager.STATE_DIR = self.state_dir
         manager.LOCK_FILE = self.state_dir / ".lock"
         manager.TMUX_SOCKET = self.state_dir / "tmux.sock"
-        manager.LOCK_TTL_SECONDS = 120
         self.session_id = "s-0123456789abcdef"
         self.token = "1" * 32
 
@@ -68,14 +66,28 @@ class TerminalLockTests(unittest.TestCase):
         self.assertEqual(renewed["page_id"], first_page)
         self.assertEqual(renewed["locked_at"], current["locked_at"])
 
-    def test_expired_lock_is_rejected_and_removed(self):
+    def test_unclaimed_lock_can_be_released_with_token_only(self):
+        lock = manager.write_lock(self.session_id, self.token, "dashboard")
+
+        self.assertTrue(manager.lock_release_allowed(lock, self.token, ""))
+        self.assertFalse(manager.lock_release_allowed(lock, "2" * 32, ""))
+
+    def test_claimed_lock_requires_matching_page(self):
+        first_page = "a" * 32
+        lock = manager.write_lock(self.session_id, self.token, "test browser", first_page)
+
+        self.assertFalse(manager.lock_release_allowed(lock, self.token, ""))
+        self.assertFalse(manager.lock_release_allowed(lock, self.token, "b" * 32))
+        self.assertTrue(manager.lock_release_allowed(lock, self.token, first_page))
+
+    def test_legacy_expiry_field_does_not_reclaim_lock(self):
         manager.write_lock(self.session_id, self.token, "test browser")
         lock = manager.read_lock(self.session_id)
-        lock["expires_at"] = int(time.time()) - 1
+        lock["expires_at"] = 1
         manager.lock_path(self.session_id).write_text(json.dumps(lock), encoding="utf-8")
 
-        self.assertFalse(manager.terminal_access_allowed(self.uri("/terminal/"))[0])
-        self.assertFalse(manager.lock_path(self.session_id).exists())
+        self.assertTrue(manager.terminal_access_allowed(self.uri("/terminal/"))[0])
+        self.assertTrue(manager.lock_path(self.session_id).exists())
 
 
 if __name__ == "__main__":

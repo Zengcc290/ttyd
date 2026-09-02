@@ -33,11 +33,11 @@ journalctl -u webterm -u webterm-manager -n 50 --no-pager
 - 公网：https://zengcc.cc.cd
 - 链路：香港 nginx/frps -> 内网 frpc -> OpenResty(Host zengcc.cc.cd) -> ttyd
 
-## 端口（仅本机）
+## 端口
 
-- 7681 ttyd
-- 7682 openresty 本地认证入口（历史兼容）
-- 7684 session manager API
+- 7681 ttyd（仅本机）
+- 7682 openresty 公网认证入口（Basic Auth）
+- 7684 session manager API（仅本机）
 
 ## 同步配置到 OpenResty
 

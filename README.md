@@ -50,13 +50,15 @@ sudo WEB_USER=admin WEB_PASS='你的网页密码' LINUX_PASS='webterm用户密�
   WEBTERM_FORCE_UNLOCK_SECRET='强制解锁密文' bash scripts/install.sh
 # 不自动同步 OpenResty:
 sudo SKIP_OPENRESTY=1 bash scripts/install.sh
+# 使用系统中与当前架构兼容的 ttyd:
+sudo TTYD_BIN=/usr/bin/ttyd bash scripts/install.sh
 ```
 
 安装完成后：
 
 - 账号写在 `/opt/webterm/etc/credentials`（仅 root）
 - 服务自动 enable + start
-- 本机端口：`7681` ttyd、`7684` API、`7682` 本地认证入口（若同步了 OpenResty）
+- 端口：`7681` ttyd（仅本机）、`7684` API（仅本机）、`7682` 公网认证入口（若同步了 OpenResty）
 
 ## 常用运维
 
@@ -71,13 +73,13 @@ journalctl -u webterm -u webterm-manager -n 80 --no-pager
 
 - 公网域名示例：`https://zengcc.cc.cd`
 - 链路：边缘 nginx/frp → 内网 OpenResty → ttyd(`127.0.0.1:7681`)
-- 本地调试入口：`http://127.0.0.1:7682/`（需 Basic Auth）
+- 公网直连入口：`http://<服务器公网 IP>:7682/`（需 Basic Auth）
 
 ## 安全说明
 
 - **真实密码不会进入本仓库**（`etc/credentials` / `etc/htpasswd` 已 gitignore）
 - 安装脚本每次可生成新密码
-- ttyd 默认只监听 `127.0.0.1`，请务必通过反代 + 认证暴露
+- ttyd 和会话管理 API 仍只监听 `127.0.0.1`；公网 `7682` 入口保留 Basic Auth
 
 ## 卸载
 
@@ -93,8 +95,8 @@ sudo bash scripts/uninstall.sh
 ## 终端互斥锁 / 复制粘贴 / 缩放
 
 - 首页点击“继续”时由后端原子加锁；终端页面和 WebSocket 握手都会再次校验锁令牌
-- 锁心跳间隔 10s、TTL 120s，关闭页面自动释放；强制解锁会断开旧终端连接
-- 强制解锁密文在安装时随机生成，也可通过 `WEBTERM_FORCE_UNLOCK_SECRET` 指定；安装后见 `/opt/webterm/etc/credentials`
+- 锁在终端页打开后一直保留，关闭页面会尝试自动释放；浏览器崩溃或网络中断时不会凭超时回收，可用强制解锁断开旧终端连接
+- 强制解锁密文默认为 `060806`，也可通过 `WEBTERM_FORCE_UNLOCK_SECRET` 指定；安装后见 `/opt/webterm/etc/credentials`
 - 终端页右上角悬浮按钮：🔍 缩放、⎘ 复制模式、📋 粘贴弹窗
 - 终端页右上角透明键盘按钮：可发送功能键、方向键、导航键和 Ctrl/Alt/Shift/Meta 组合键；展开时自动缩短终端区域，命令行输入框不会被面板遮挡
 - 复制模式会禁用触摸滚动；退出后恢复

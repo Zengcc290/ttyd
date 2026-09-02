@@ -23,8 +23,7 @@ IDLE_TTL = int(os.environ.get("WEBTERM_IDLE_TTL_SECONDS", "604800"))
 CLEANUP_INTERVAL = int(os.environ.get("WEBTERM_CLEANUP_INTERVAL_SECONDS", "600"))
 LOCK = threading.RLock()
 
-FORCE_UNLOCK_SECRET = os.environ.get("WEBTERM_FORCE_UNLOCK_SECRET", "")
-LOCK_TTL_SECONDS = int(os.environ.get("WEBTERM_LOCK_TTL_SECONDS", "120"))
+FORCE_UNLOCK_SECRET = os.environ.get("WEBTERM_FORCE_UNLOCK_SECRET", "060806")
 
 
 def lock_path(session_id: str) -> Path:
@@ -57,7 +56,6 @@ def write_lock(
         "page_id": page_id,
         "locked_at": locked_at or now,
         "heartbeat_at": now,
-        "expires_at": now + LOCK_TTL_SECONDS,
     }
     target = lock_path(session_id)
     temp = target.with_suffix(".lock.json.tmp")
@@ -71,15 +69,8 @@ def clear_lock(session_id: str) -> None:
 
 
 def lock_active(lock: dict | None) -> bool:
-    if not lock:
-        return False
-    try:
-        expires = int(lock.get("expires_at", 0))
-    except (TypeError, ValueError):
-        return False
-    if expires <= int(time.time()):
-        return False
-    return bool(lock.get("token"))
+    """A lock remains active until its owner releases it or force-unlock clears it."""
+    return bool(lock and str(lock.get("token") or ""))
 
 
 def public_lock_info(lock: dict | None) -> dict:
@@ -91,15 +82,28 @@ def public_lock_info(lock: dict | None) -> dict:
         "owner": str(lock.get("owner") or ""),
         "locked_at": int(lock.get("locked_at", 0)),
         "heartbeat_at": int(lock.get("heartbeat_at", 0)),
-        "expires_at": int(lock.get("expires_at", 0)),
-        "ttl": LOCK_TTL_SECONDS,
     }
 
 
 def purge_expired_lock(session_id: str) -> None:
-    lock = read_lock(session_id)
-    if lock and not lock_active(lock):
-        clear_lock(session_id)
+    # Kept as a compatibility hook for callers and old state files. Locks are
+    # intentionally never reclaimed based on elapsed time.
+    return None
+
+
+def lock_release_allowed(lock: dict | None, token: str, page_id: str) -> bool:
+    if not lock or not token:
+        return False
+    current_token = str(lock.get("token") or "")
+    if not current_token or not secrets.compare_digest(current_token, token):
+        return False
+    claimed_page = str(lock.get("page_id") or "")
+    if not claimed_page:
+        return not page_id or bool(re.fullmatch(r"[a-f0-9]{32}", page_id))
+    return bool(
+        re.fullmatch(r"[a-f0-9]{32}", page_id)
+        and secrets.compare_digest(claimed_page, page_id)
+    )
 
 
 def terminal_access_allowed(original_uri: str) -> tuple[bool, str]:
@@ -266,6 +270,10 @@ def cleanup_stale() -> int:
             if not data:
                 continue
             session_id = data["id"]
+            # A held terminal lock is an explicit reservation. Do not let the
+            # idle-session janitor reclaim it behind the owner's back.
+            if lock_active(read_lock(session_id)):
+                continue
             marker = activity_path(session_id)
             try:
                 last_active = marker.stat().st_mtime
@@ -306,8 +314,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json(self) -> dict:
-        if self.headers.get("X-Webterm-Request") != "1":
+    def read_json(self, allow_beacon: bool = False) -> dict:
+        if self.headers.get("X-Webterm-Request") != "1" and not allow_beacon:
             raise ValueError("missing request header")
         content_type = self.headers.get("Content-Type", "")
         if not content_type.startswith("application/json"):
@@ -357,9 +365,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        path = urlparse(self.path).path.rstrip("/")
+        request = urlparse(self.path)
+        path = request.path.rstrip("/")
+        beacon_release = (
+            request.query == "beacon=1"
+            and path.endswith("/release")
+            and self.headers.get("X-Webterm-Request") != "1"
+        )
         try:
-            payload = self.read_json()
+            payload = self.read_json(allow_beacon=beacon_release)
         except (ValueError, json.JSONDecodeError) as exc:
             self.send_json(400, {"error": str(exc)})
             return
@@ -434,15 +448,7 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "release":
                     token = str(payload.get("token") or "")
                     page_id = str(payload.get("page_id") or "")
-                    claimed_page = str(current.get("page_id") or "") if current else ""
-                    page_matches = bool(
-                        re.fullmatch(r"[a-f0-9]{32}", page_id)
-                        and (
-                            not claimed_page
-                            or secrets.compare_digest(claimed_page, page_id)
-                        )
-                    )
-                    if current and current.get("token") == token and page_matches:
+                    if lock_release_allowed(current, token, page_id):
                         clear_lock(session_id)
                         self.send_json(200, {"ok": True, "id": session_id, "locked": False})
                         return

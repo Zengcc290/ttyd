@@ -47,6 +47,10 @@
     .status { width: 9px; height: 9px; border-radius: 50%; background: #526071; flex: none; }
     .status.running { background: var(--green); box-shadow: 0 0 0 5px rgba(54,211,153,.1); }
     .session-name { margin: 0; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .name-editor { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+    .name-editor input { min-width: 0; width: min(360px, 100%); border: 1px solid var(--green); border-radius: 6px; padding: 7px 9px; color: var(--text); background: var(--panel-2); font: inherit; }
+    .icon-btn { width: 30px; height: 30px; padding: 0; display: inline-grid; place-items: center; color: var(--muted); line-height: 1; flex: none; }
+    .icon-btn:hover { color: var(--text); }
     .meta { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; color: var(--muted); font-size: 12px; }
     .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
     .btn { border: 1px solid var(--line); border-radius: 6px; padding: 9px 12px; color: var(--text); background: var(--panel-2); cursor: pointer; }
@@ -76,6 +80,7 @@
       .card { grid-template-columns: 1fr; }
       .actions { justify-content: flex-start; }
       .btn { flex: 1; }
+      .title-row .icon-btn { flex: none; }
     }
   </style>
 </head>
@@ -122,6 +127,8 @@
     const sessionsEl = document.getElementById('sessions');
     const toastEl = document.getElementById('toast');
     let sessions = [];
+    let editingSessionId = null;
+    const renamingSessions = new Set();
 
     function toast(message, error = false) {
       toastEl.textContent = message;
@@ -210,26 +217,43 @@
       }
     }
 
+    function updateSessionLockState(id, lockInfo = {}) {
+      const session = sessions.find(item => item.id === id);
+      if (!session) return;
+      session.locked = Boolean(lockInfo.locked);
+      session.lock = session.locked ? {
+        locked: true,
+        owner: String(lockInfo.owner || ''),
+        locked_at: Number(lockInfo.locked_at || 0),
+        heartbeat_at: Number(lockInfo.heartbeat_at || 0)
+      } : { locked: false };
+      render();
+    }
+
     async function tryOpenSession(id, targetWindow = undefined) {
-      // Always ask backend at click time (never trust stale button state alone).
       try {
-        const status = await api(`/api/sessions/${id}/lock`);
-        if (status.locked) {
-          closeTarget(targetWindow);
-          showForceUnlock(id, undefined, status);
-          return false;
-        }
-        // Acquire is the authoritative, atomic check against concurrent devices.
+        // Acquire checks and claims the live lock atomically; dashboard state may be stale.
         const owner = `dashboard ${navigator.userAgent.slice(0, 32)}`;
         const acquired = await api(`/api/sessions/${id}/acquire`, {
           method: 'POST',
           body: JSON.stringify({ owner })
         });
-        return openSession(id, acquired.token, targetWindow);
+        updateSessionLockState(id, acquired);
+        if (openSession(id, acquired.token, targetWindow)) return true;
+        try {
+          await api(`/api/sessions/${id}/release`, {
+            method: 'POST',
+            body: JSON.stringify({ token: acquired.token })
+          });
+          updateSessionLockState(id, { locked: false });
+        } catch (_) {}
+        return false;
       } catch (error) {
         if (error.status === 409) {
+          const lockInfo = { ...(error.body || {}), locked: true };
+          updateSessionLockState(id, lockInfo);
           closeTarget(targetWindow);
-          showForceUnlock(id, undefined, error.body || {});
+          showForceUnlock(id, undefined, lockInfo);
           return false;
         }
         closeTarget(targetWindow);
@@ -245,6 +269,58 @@
       el.textContent = label;
       el.addEventListener('click', action);
       return el;
+    }
+
+    function beginRename(sessionId) {
+      editingSessionId = sessionId;
+      render();
+      requestAnimationFrame(() => {
+        const input = document.querySelector(`[data-rename-input="${sessionId}"]`);
+        if (input) {
+          input.focus();
+          input.select();
+        }
+      });
+    }
+
+    function cancelRename() {
+      editingSessionId = null;
+      render();
+    }
+
+    async function saveRename(session, input, form) {
+      const name = input.value.trim();
+      if (!name) {
+        toast('终端名称不能为空', true);
+        input.focus();
+        return;
+      }
+      if (renamingSessions.has(session.id)) return;
+      if (name === session.name) {
+        cancelRename();
+        return;
+      }
+
+      renamingSessions.add(session.id);
+      [...form.elements].forEach(element => { element.disabled = true; });
+      try {
+        const updated = await api(`/api/sessions/${session.id}/rename`, {
+          method: 'POST',
+          body: JSON.stringify({ name })
+        });
+        const index = sessions.findIndex(item => item.id === session.id);
+        if (index !== -1) sessions[index] = updated;
+        editingSessionId = null;
+        render();
+        toast('终端名称已更新');
+      } catch (error) {
+        toast(`名称更新失败：${error.message}`, true);
+        input.focus();
+        input.select();
+      } finally {
+        renamingSessions.delete(session.id);
+        [...form.elements].forEach(element => { element.disabled = false; });
+      }
     }
 
     function render() {
@@ -269,10 +345,48 @@
         titleRow.className = 'title-row';
         const status = document.createElement('span');
         status.className = `status${session.running ? ' running' : ''}`;
-        const title = document.createElement('h3');
-        title.className = 'session-name';
-        title.textContent = session.name;
-        titleRow.append(status, title);
+        titleRow.append(status);
+        if (editingSessionId === session.id) {
+          const form = document.createElement('form');
+          form.className = 'name-editor';
+          form.addEventListener('submit', event => {
+            event.preventDefault();
+            saveRename(session, input, form);
+          });
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.value = session.name;
+          input.maxLength = 80;
+          input.autocomplete = 'off';
+          input.setAttribute('aria-label', '终端名称');
+          input.dataset.renameInput = session.id;
+          input.addEventListener('keydown', event => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              cancelRename();
+            }
+          });
+          const saveButton = document.createElement('button');
+          saveButton.type = 'submit';
+          saveButton.className = 'btn icon-btn';
+          saveButton.textContent = '✓';
+          saveButton.title = '保存名称';
+          saveButton.setAttribute('aria-label', '保存名称');
+          const cancelButton = button('×', 'icon-btn', cancelRename);
+          cancelButton.title = '取消编辑';
+          cancelButton.setAttribute('aria-label', '取消编辑');
+          form.append(input, saveButton, cancelButton);
+          titleRow.append(form);
+        } else {
+          const title = document.createElement('h3');
+          title.className = 'session-name';
+          title.textContent = session.name;
+          titleRow.append(title);
+          const editButton = button('✎', 'icon-btn', () => beginRename(session.id));
+          editButton.title = '编辑终端名称';
+          editButton.setAttribute('aria-label', '编辑终端名称');
+          titleRow.append(editButton);
+        }
         const meta = document.createElement('div');
         meta.className = 'meta';
         meta.append(
@@ -296,16 +410,13 @@
             await tryOpenSession(session.id, targetWindow);
           }),
           button('强制解锁', '', async () => {
-            try {
-              const lockInfo = await api(`/api/sessions/${session.id}/lock`);
-              if (lockInfo.locked) showForceUnlock(session.id, null, lockInfo);
-              else {
-                toast('该终端当前未加锁');
-                await refresh();
-              }
-            } catch (error) {
-              toast(`锁状态校验失败：${error.message}`, true);
+            const targetWindow = openTerminalTarget();
+            if (!targetWindow) {
+              toast('浏览器阻止了新终端标签页，请允许此站点打开新标签页后重试。', true);
+              return;
             }
+            const opened = await tryOpenSession(session.id, targetWindow);
+            if (opened) toast('检测到终端未被占用，已进入终端');
           }),
           button('重置', '', async () => {
             let lockInfo;
