@@ -1,9 +1,21 @@
+# Deployment credentials and local environment files
 etc/credentials
 etc/htpasswd
+.env
+.env.*
+!.env.example
+
+# Runtime state and logs
 log/*
 !log/.gitkeep
 state/*
 !state/.gitkeep
 *.log
-.env
+
+# Generated caches and editor/OS metadata
+__pycache__/
+*.py[cod]
+*.swp
+*.swo
+*~
 .DS_Store
